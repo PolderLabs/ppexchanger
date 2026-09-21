@@ -149,6 +149,7 @@ const commandCatalog: CommandItem[] = [
 	{command: '/send', description: 'send a file'},
 	{command: '/trust', description: 'trust the selected peer'},
 	{command: '/revoke', description: 'revoke peer trust'},
+	{command: '/disconnect', description: 'disconnect from selected peer'},
 	{command: '/quit', description: 'exit ppx'}
 ];
 
@@ -1321,13 +1322,11 @@ export function App({identity, directory, peers: initialPeers, messages: initial
 				} finally {
 					setBusy(false);
 				}
-				return;
 			}
-			if (command === 'trust' || command === 'revoke') {
+			if (command === 'disconnect') {
 				if (!selected) { setStatus('Select a peer first'); return; }
-				const trusted = command === 'trust';
-				setPeers(current => current.map(peer => peer.peerId === selected.peerId ? {...peer, trusted} : peer));
-				setStatus(trusted ? selected.name + ' is trusted' : 'Trust revoked for ' + selected.name);
+				try { await network.disconnect(selected.peerId); setStatus('Disconnected from ' + selected.name); }
+				catch (error) { setStatus('Could not disconnect: ' + (error as Error).message); }
 				return;
 			}
 			if (command === 'quit') {

@@ -263,7 +263,7 @@ export function App({identity, directory, peers: initialPeers, messages: initial
 		if (target.kind === 'peer') {
 			const peer = sortedPeers.find(candidate => candidate.peerId === target.peerId);
 			return [
-				{label: peer?.status === 'connected' ? 'Reconnect' : 'Connect', hint: 'c', action: 'connect-peer'},
+				{label: peer?.status === 'connected' ? 'Reconnect' : 'Connect', hint: 'connect', action: 'connect-peer'},
 				{label: peer?.trusted ? 'Revoke trust' : 'Trust peer', hint: peer?.trusted ? 'revoke' : 'trust', action: peer?.trusted ? 'revoke-peer' : 'trust-peer'},
 				{label: 'Remove peer', hint: 'hide', action: 'remove-peer'},
 				{label: 'Focus composer', hint: 'Enter', action: 'focus-composer'}
@@ -271,12 +271,12 @@ export function App({identity, directory, peers: initialPeers, messages: initial
 		}
 		if (target.kind === 'composer') return [
 			{label: 'Clear draft', hint: 'Esc', action: 'clear-draft'},
-			{label: 'Open settings', hint: ',', action: 'open-settings'}
+			{label: 'Open settings', hint: '/settings', action: 'open-settings'}
 		];
 		return [
 			{label: 'Focus composer', hint: 'Enter', action: 'focus-composer'},
 			{label: 'Clear draft', hint: 'Esc', action: 'clear-draft'},
-			{label: 'Open settings', hint: ',', action: 'open-settings'}
+			{label: 'Open settings', hint: '/settings', action: 'open-settings'}
 		];
 	}, [contextMenu, messages, sortedPeers]);
 
@@ -632,6 +632,11 @@ export function App({identity, directory, peers: initialPeers, messages: initial
 		}
 		if (key.ctrl && input.toLowerCase() === 'v') {
 			void pasteFromClipboard();
+			return;
+		}
+		if (input === ',' && focus !== 'composer') {
+			setView('settings');
+			setFocus('composer');
 			return;
 		}
 		if (key.ctrl && input.toLowerCase() === 'b' && focus !== 'composer') {
@@ -1845,6 +1850,7 @@ function HelpView({palette}: {palette: Palette}): React.JSX.Element {
 			<HelpLine keyName="Drop" text="drag files into the terminal to attach them" palette={palette} />
 			<HelpLine keyName="Del / Ctrl+X" text="remove selected peer (confirm)" palette={palette} />
 			<HelpLine keyName="Ctrl+B" text="collapse or expand the sidebar" palette={palette} />
+			<HelpLine keyName="Ctrl+D" text="refresh LAN discovery" palette={palette} />
 			<HelpLine keyName="," text="open settings" palette={palette} />
 			<HelpLine keyName="PgUp/PgDn" text="scroll the current conversation" palette={palette} />
 			<HelpLine keyName="Esc" text="close a view or clear the composer" palette={palette} />

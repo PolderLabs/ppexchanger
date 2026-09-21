@@ -44,40 +44,66 @@ npm run dev:alice
 npm run dev:bob
 ```
 
-Alice and Bob use separate identities and state directories under `.local/`, share the local UDP discovery channel, and listen on TCP ports `47392` and `47393`. Wait for each name to appear in the other terminal’s PEERS sidebar, select it, and press `c` to connect. Then type a message and press Enter. You can also test file transfer by dragging a file into the composer and accepting it in the other terminal.
+Alice and Bob use separate identities and state directories under `.local/`, share the local UDP discovery channel, and listen on TCP ports `47392` and `47393`. Wait for each name to appear in the other terminal's PEERS sidebar. Selecting a discovered peer from the list with `↑`/`↓` initiates a TCP session; alternatively, type `/connect <peer name>` in either terminal to start the session from the composer. Then type a message and press `Enter`. You can also test file transfer by dragging a file into the composer and accepting it in the other terminal.
 
 To start over with fresh local identities, remove `.local/ppx-alice` and `.local/ppx-bob` before launching the pair again.
 
 ## In the app
 
-- `j` / `k` or the arrow keys select a nearby peer.
-- `c` connects to the selected peer.
-- Enter sends the current message.
-- The interface uses the full terminal, with a peer sidebar, conversation pane, composer, settings view, and help view.
-- Click peers, the composer, top-bar `Settings`/`help`, settings rows, file actions, and command suggestions with the mouse.
-- Type `/` or `/h` in the composer for an arrow-key and mouse-selectable command popup; Enter fills the selected command.
-- Paste text directly into the composer; long or multiline pastes are shown as a compact preview while the full original is sent and remains available through the message `[copy]` action.
-- Drag or paste file paths and `file://` URLs into the composer to queue files, including images; supported pasted `data:image/*;base64,...` payloads are staged locally too, then press Enter to send them.
-- `Ctrl+V` reads text, copied files, and clipboard images through native desktop clipboard APIs on Windows and Linux/Wayland, with terminal clipboard fallback where available.
-- `Ctrl+Backspace` removes the previous word in the composer.
-- `,` opens settings; `b` toggles the sidebar; `Tab` cycles focus; `Esc` closes views or clears the composer.
-- `/connect NAME`, `/peers`, `/discover`, `/name NAME`, and `/send PATH` are available commands.
-- Incoming files require an explicit accept (`Enter` or `a`) or reject (`Esc` or `r`).
-- `?` opens the keyboard guide; `Ctrl-C` exits cleanly.
+The keybindings below are global to the chat view. Most commands are also available through the slash-command popup (type `/` in the composer for an autocomplete).
+
+### Movement and focus
+
+- `↑` / `↓` move through discovered peers in the sidebar.
+- `Tab` / `Shift+Tab` cycles focus between the peer sidebar and the composer.
+- `Enter` focuses the composer, sends the current message, or activates the selected setting.
+- `PgUp` / `PgDn` scroll the current conversation.
+
+### Messaging
+
+- Type and press `Enter` to send. Long or multiline pastes show a compact preview; the full original is preserved and sent intact.
+- `Ctrl+V` reads text, copied files, and clipboard images from the native desktop clipboard: Windows PowerShell, Linux (X11 and Wayland), and macOS (`pbpaste`/`pbcopy`).
+
+### Composer
+
+- Paste text, file paths, `file://` URLs, and `data:image/*;base64,...` payloads directly into the composer; Enter sends them.
+- `Backspace` and `Delete` remove one character; `Ctrl+W`, `Ctrl+H`, and `Ctrl+Backspace` remove the previous word.
+- `Esc` clears the composer and any queued attachments.
+
+### Peers
+
+- Selecting a discovered peer from the sidebar initiates a connection automatically.
+- Type `/connect <name or peer-id>` to connect to a specific peer (also useful for name collisions).
+- `Del` or `Ctrl+X` on a selected peer removes it (with confirmation).
+- `Ctrl+D` triggers a fresh LAN discovery scan.
+- `Ctrl+B` collapses or expands the sidebar.
+
+### File transfer
+
+- Drag a file into the terminal or paste a path to queue it; press `Enter` to send. Use `/send <path>` from the composer too.
+- Incoming files show an accept/reject prompt: `Enter` or `a` accepts, `Esc` or `r` rejects.
+- The received-file viewer supports `o` to open the file with the system viewer, `l` to reveal its location in the file manager, `j`/`k` or arrow keys to scroll, `←`/`→` to pan wide text, and `Home`/`End` to jump.
+
+### Settings and help
+
+- `,` opens the settings view; `Esc` or `,` again closes it.
+- `/help` opens the keyboard guide (also reachable from the top bar).
+- `/settings`, `/peers`, `/discover`, `/name <display name>`, `/send <path>`, `/trust`, `/revoke`, and `/quit` are available from the composer.
+- `Ctrl+C` exits the app cleanly.
 
 Messages and received files never leave the local devices. Received files are written below the configured state directory in `received/` with sanitized names.
 
-Inline image rendering depends on terminal graphics support. Kitty, Ghostty, and WezTerm can display native previews; terminals without the Kitty graphics protocol, including Windows Terminal, retain the image message and its open/reveal actions without attempting unsupported escape sequences.
+Inline image rendering depends on terminal graphics support. Kitty, Ghostty, and WezTerm display native previews; terminals without the Kitty graphics protocol, including Windows Terminal, retain the image message and its open/reveal actions without attempting unsupported escape sequences.
 
 ## Development
 
 ```sh
-npm run check
-npm test
-npm run build
+npm run check   # TypeScript strict type check
+npm test        # unit + integration tests (9 tests)
+npm run build   # TypeScript → dist/
 ```
 
-The tests cover protocol framing, beacon validation, key agreement, AEAD authentication, durable state, encrypted text delivery, and an end-to-end file transfer between two local services.
+The test suite covers: X25519 key derivation, ChaCha20-Poly1305 AEAD, two-service encrypted session establishment and text delivery, LAN beacon round-trip, encrypted frame sequence ordering, beacon validation, durable state with identity persistence, file-name sanitization, and message history pagination.
 
 ## Network contract
 

@@ -7,7 +7,7 @@ import {mkdir, open, readdir, readFile, rename, stat, unlink, writeFile} from 'n
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fingerprint, generateX25519KeyPair, peerId, randomId, transcriptMac, x25519} from './crypto.js';
-import {DISCOVERY_GROUP, DISCOVERY_PORT, decodeBeacon, decodeEncryptedFrame, encodeBeacon, encodeEncryptedFrame, type Beacon, type Frame, handshakeKey} from './protocol.js';
+import {DISCOVERY_GROUP, DISCOVERY_PORT, MAX_FRAME, decodeBeacon, decodeEncryptedFrame, encodeBeacon, encodeEncryptedFrame, type Beacon, type Frame, handshakeKey} from './protocol.js';
 import {receivedDirectory, sanitizeFileName} from './storage.js';
 import type {FileOffer, Identity, NetworkEvent, Peer, PeerId, PeerStatus} from './types.js';
 
@@ -20,37 +20,61 @@ type OutboundTransfer = {peerId: PeerId; connection: Connection; path: string; n
 type InboundTransfer = {peerId: PeerId; connection: Connection; offer: FileOffer; path: string; handle: Awaited<ReturnType<typeof open>>; received: number};
 type LocalDiscoveryRecord = {peerId: PeerId; name: string; hostname: string; port: number; publicKey: string; updatedAt: number};
 
+const READER_HIGH_WATER = 1 << 20;
+const READER_LOW_WATER = 1 << 18;
+const READER_MAX_BUFFER = 8 << 20;
+
 class Reader {
 	private buffer = Buffer.alloc(0);
 	private waiting: Array<{length: number; resolve: (value: Buffer) => void; reject: (error: Error) => void}> = [];
 	private ended?: Error;
+	private paused = false;
 
 	constructor(private readonly socket: Socket) {
-		socket.on('data', chunk => {
-			this.buffer = Buffer.concat([this.buffer, chunk]);
-			this.flush();
-		});
+		socket.on('data', chunk => this.receive(chunk));
 		socket.on('close', () => this.end(new Error('peer closed the connection')));
 		socket.on('error', error => this.end(error));
 	}
 
 	read(length: number): Promise<Buffer> {
-		if (this.buffer.length >= length) {
-			const value = this.buffer.subarray(0, length);
-			this.buffer = this.buffer.subarray(length);
-			return Promise.resolve(value);
-		}
+		if (length < 1 || length > MAX_FRAME) return Promise.reject(new Error('read length is out of range'));
+		if (this.buffer.length >= length) return Promise.resolve(this.consume(length));
 		if (this.ended) return Promise.reject(this.ended);
-		return new Promise((resolve, reject) => this.waiting.push({length, resolve, reject}));
+		const {promise, resolve, reject} = Promise.withResolvers<Buffer>();
+		this.waiting.push({length, resolve, reject});
+		return promise;
+	}
+
+	private receive(chunk: Buffer): void {
+		if (this.ended) return;
+		this.buffer = Buffer.concat([this.buffer, chunk]);
+		if (this.buffer.length > READER_MAX_BUFFER) {
+			this.end(new Error('peer sent more unread data than the receive window allows'));
+			this.socket.destroy();
+			return;
+		}
+		this.flush();
+		if (!this.paused && this.buffer.length > READER_HIGH_WATER) {
+			this.paused = true;
+			this.socket.pause();
+		}
 	}
 
 	private flush(): void {
 		while (this.waiting[0] && this.buffer.length >= this.waiting[0].length) {
 			const waiter = this.waiting.shift()!;
-			const value = this.buffer.subarray(0, waiter.length);
-			this.buffer = this.buffer.subarray(waiter.length);
-			waiter.resolve(value);
+			waiter.resolve(this.consume(waiter.length));
 		}
+	}
+
+	private consume(length: number): Buffer {
+		const value = Buffer.from(this.buffer.subarray(0, length));
+		this.buffer = this.buffer.subarray(length);
+		if (this.paused && this.buffer.length < READER_LOW_WATER) {
+			this.paused = false;
+			this.socket.resume();
+		}
+		return value;
 	}
 
 	private end(error: Error): void {
@@ -72,14 +96,17 @@ class Connection {
 		if (this.closed) throw new Error('connection is closed');
 		const packet = encodeEncryptedFrame(this.keys.send, this.sendSequence, frame);
 		this.sendSequence++;
-		await new Promise<void>((resolve, reject) => {
-			this.socket.write(packet, error => error ? reject(error) : resolve());
-		});
+		const writeError = await new Promise<Error | null>(resolve => this.socket.write(packet, error => resolve(error ?? null)));
+		if (writeError) {
+			this.closed = true;
+			throw writeError;
+		}
 	}
 
 	async read(reader: Reader): Promise<Frame> {
+		if (this.closed) throw new Error('connection is closed');
 		const length = (await reader.read(4)).readUInt32BE(0);
-		if (length < 16 || length > 64 * 1024) throw new Error('encrypted frame length is invalid');
+		if (length < 16 || length > MAX_FRAME) throw new Error('encrypted frame length is invalid');
 		const payload = await reader.read(length);
 		const header = Buffer.alloc(4);
 		header.writeUInt32BE(length);
@@ -227,45 +254,49 @@ export class NetworkService extends EventEmitter {
 				try {
 					this.udp.addMembership(DISCOVERY_GROUP);
 					this.udp.setMulticastTTL(1);
+					this.udp.setMulticastLoopback(true);
 					this.udpStarted = true;
 					resolve();
 				} catch (error) { reject(error); }
 			});
 		});
-		await this.writeLocalDiscoveryRecord();
-		await this.announce();
-		this.announceTimer = setInterval(() => void this.announce(), 10_000);
+		this.announceTimer = setInterval(() => {
+			void this.writeLocalDiscoveryRecord();
+			void this.announce();
+		}, 10_000);
 		this.localDiscoveryTimer = setInterval(() => void this.refreshLocalDiscovery(), 1_000);
-		void this.refreshLocalDiscovery();
+		await this.refreshLocalDiscovery();
 	}
 
+
 	async stop(): Promise<void> {
-		if (this.announceTimer) clearInterval(this.announceTimer);
-		if (this.localDiscoveryTimer) clearInterval(this.localDiscoveryTimer);
-		await unlink(this.localDiscoveryPath).catch(() => undefined);
+		clearInterval(this.announceTimer);
+		clearInterval(this.localDiscoveryTimer);
+
 		if (this.udpStarted) {
 			this.udp.close();
 			this.udpStarted = false;
 		}
 		for (const connection of this.connections.values()) connection.close();
-		if (this.tcpStarted) {
-			await new Promise<void>(resolve => this.tcpServer.close(() => resolve()));
-			this.tcpStarted = false;
-		}
+		this.connections.clear();
+		await this.abortAllTransfers('service stopped');
+		this.tcpStarted = false;
+		await new Promise<void>(resolve => this.tcpServer.close(() => resolve()));
 	}
 
 	async connect(peer: PeerId): Promise<void> {
+		if (!this.tcpStarted) throw new Error('service is not running');
 		const target = this.peers.get(peer);
 		if (!target || this.connections.has(peer)) return;
 		this.setPeerStatus(peer, 'connecting');
+		const {promise, resolve, reject} = Promise.withResolvers<Socket>();
+		const candidate = tcpConnect({host: target.address, port: target.port});
+		candidate.setTimeout(FRAME_TIMEOUT, () => candidate.destroy(new Error('connection timed out')));
+		candidate.once('connect', () => resolve(candidate));
+		candidate.once('error', reject);
 		let socket: Socket | undefined;
 		try {
-			socket = await new Promise<Socket>((resolve, reject) => {
-				const candidate = tcpConnect({host: target.address, port: target.port});
-				candidate.setTimeout(FRAME_TIMEOUT, () => candidate.destroy(new Error('connection timed out')));
-				candidate.once('connect', () => resolve(candidate));
-				candidate.once('error', reject);
-			});
+			socket = await promise;
 			const result = await handshakeAsInitiator(socket, this.identity);
 			if (!result.remoteStatic.equals(target.publicKey)) throw new Error('peer key changed; refusing to connect');
 			await this.attach(peer, target, result.connection, result.reader);
@@ -284,10 +315,10 @@ export class NetworkService extends EventEmitter {
 	}
 
 	async sendFile(peer: PeerId, path: string): Promise<void> {
+		if (!this.tcpStarted) throw new Error('service is not running');
 		const connection = this.connections.get(peer);
 		if (!connection) throw new Error('peer is not connected');
 		const file = await stat(path);
-		if (!file.isFile()) throw new Error('path is not a regular file');
 		const id = randomId();
 		const name = sanitizeFileName(path.split(/[\\/]/).pop() ?? 'attachment');
 		const mime = mimeFor(name);
@@ -305,8 +336,11 @@ export class NetworkService extends EventEmitter {
 	}
 
 	async acceptFile(peer: PeerId, offer: FileOffer): Promise<void> {
+		if (!this.tcpStarted) throw new Error('service is not running');
 		const connection = this.connections.get(peer);
 		if (!connection) throw new Error('peer is not connected');
+		if (this.inboundTransfers.has(offer.id)) throw new Error('file offer already accepted');
+		if (this.outboundTransfers.has(offer.id)) throw new Error('file id collides with an outbound transfer');
 		const directory = receivedDirectory(this.dataDirectory);
 		await mkdir(directory, {recursive: true, mode: 0o700});
 		const path = join(directory, `${offer.id}-${sanitizeFileName(offer.name)}`);
@@ -429,22 +463,20 @@ export class NetworkService extends EventEmitter {
 			while (this.connections.get(id) === connection) {
 				const frame = await connection.read(reader);
 				if (frame.tag === 'hello') {
-					peer.name = frame.name || peer.name;
-					peer.hostname = frame.hostname;
+					const trimmedName = frame.name.trim();
+					if (trimmedName) peer.name = trimmedName.slice(0, 48);
+					if (frame.hostname) peer.hostname = frame.hostname;
 					this.emit('event', {type: 'peer', peer} satisfies NetworkEvent);
 				} else if (frame.tag === 'text') {
 					this.emit('event', {type: 'message', peerId: id, body: frame.body, direction: 'incoming'} satisfies NetworkEvent);
 				} else if (frame.tag === 'file-offer') {
-						this.emit('event', {type: 'file-offer', peerId: id, offer: {id: frame.id, name: frame.name, size: frame.size, ...(frame.mime ? {mime: frame.mime} : {})}} satisfies NetworkEvent);
+					this.emit('event', {type: 'file-offer', peerId: id, offer: {id: frame.id, name: frame.name, size: frame.size, ...(frame.mime ? {mime: frame.mime} : {})}} satisfies NetworkEvent);
 				} else if (frame.tag === 'file-accept') {
 					const transfer = this.outboundTransfers.get(frame.id);
 					if (transfer) void this.streamFile(frame.id, transfer);
+					else await connection.send({tag: 'file-reject', id: frame.id}).catch(() => undefined);
 				} else if (frame.tag === 'file-reject') {
-					const transfer = this.outboundTransfers.get(frame.id);
-					if (transfer) {
-						this.outboundTransfers.delete(frame.id);
-						transfer.reject(new Error('peer rejected the file'));
-					}
+					if (!this.rejectOutbound(frame.id)) await this.abortInboundTransfer(frame.id, 'the sender cancelled the transfer');
 				} else if (frame.tag === 'file-chunk') {
 					await this.receiveChunk(frame.id, frame.offset, frame.data);
 				} else if (frame.tag === 'file-done') {
@@ -458,18 +490,7 @@ export class NetworkService extends EventEmitter {
 			this.connections.delete(id);
 			this.setPeerStatus(id, 'offline');
 		}
-		for (const [transferId, transfer] of this.outboundTransfers) {
-			if (transfer.peerId === id) {
-				this.outboundTransfers.delete(transferId);
-				transfer.reject(new Error('peer disconnected during file transfer'));
-			}
-		}
-		for (const [transferId, transfer] of this.inboundTransfers) {
-			if (transfer.peerId === id) {
-				this.inboundTransfers.delete(transferId);
-				await transfer.handle.close();
-			}
-		}
+		await this.abortTransfersFor(id, 'peer disconnected during file transfer');
 	}
 
 	private async streamFile(id: string, transfer: OutboundTransfer): Promise<void> {
@@ -493,7 +514,8 @@ export class NetworkService extends EventEmitter {
 	private async receiveChunk(id: string, offset: number, data: Buffer): Promise<void> {
 		const transfer = this.inboundTransfers.get(id);
 		if (!transfer || offset !== transfer.received) throw new Error('unexpected file chunk');
-		if (transfer.received + data.length > transfer.offer.size) throw new Error('file exceeds offered size');
+		if (data.length > transfer.offer.size - transfer.received) throw new Error('file exceeds offered size');
+		if (data.length > 32 * 1024) throw new Error('file chunk exceeds wire limit');
 		await transfer.handle.write(data, 0, data.length, offset);
 		transfer.received += data.length;
 	}
@@ -507,6 +529,38 @@ export class NetworkService extends EventEmitter {
 		this.emit('event', {type: 'file-received', peerId: transfer.peerId, name: transfer.offer.name, path: transfer.path, size: transfer.received, ...(transfer.offer.mime ? {mime: transfer.offer.mime} : {})} satisfies NetworkEvent);
 	}
 
+	private rejectOutbound(id: string): boolean {
+		const transfer = this.outboundTransfers.get(id);
+		if (!transfer) return false;
+		this.outboundTransfers.delete(id);
+		transfer.reject(new Error('peer rejected the file'));
+		return true;
+	}
+
+	private async abortInboundTransfer(id: string, reason: string): Promise<void> {
+		const transfer = this.inboundTransfers.get(id);
+		if (!transfer) return;
+		this.inboundTransfers.delete(id);
+		await transfer.handle.close();
+		await unlink(transfer.path).catch(() => undefined);
+		this.emitStatus(reason);
+	}
+
+	private async abortTransfersFor(peer: PeerId, reason: string): Promise<void> {
+		for (const [id, transfer] of this.outboundTransfers) {
+			if (transfer.peerId === peer) {
+				this.outboundTransfers.delete(id);
+				transfer.reject(new Error(reason));
+			}
+		}
+		for (const [id, transfer] of this.inboundTransfers) {
+			if (transfer.peerId === peer) {
+				this.inboundTransfers.delete(id);
+				await transfer.handle.close().catch(() => undefined);
+			}
+		}
+	}
+
 	private setPeerStatus(peerIdValue: PeerId, status: PeerStatus): void {
 		const peer = this.peers.get(peerIdValue);
 		if (peer) {
@@ -517,6 +571,42 @@ export class NetworkService extends EventEmitter {
 
 	private emitStatus(message: string): void {
 		this.emit('event', {type: 'status', message} satisfies NetworkEvent);
+	}
+
+	async disconnect(peer: PeerId): Promise<void> {
+		const connection = this.connections.get(peer);
+		if (!connection) return;
+		this.connections.delete(peer);
+		try { await connection.send({tag: 'bye'}); } catch { /* ignore */ }
+		connection.close();
+		this.setPeerStatus(peer, 'offline');
+		for (const [id, transfer] of this.outboundTransfers) {
+			if (transfer.peerId === peer) {
+				this.outboundTransfers.delete(id);
+				transfer.reject(new Error('disconnected'));
+			}
+		}
+		for (const [id, transfer] of this.inboundTransfers) {
+			if (transfer.peerId === peer) {
+				this.inboundTransfers.delete(id);
+				await transfer.handle.close();
+			}
+		}
+	}
+
+	forgetPeer(peerId: PeerId): void {
+		this.peers.delete(peerId);
+	}
+
+	private async abortAllTransfers(reason: string): Promise<void> {
+		for (const [id, transfer] of this.outboundTransfers) {
+			this.outboundTransfers.delete(id);
+			transfer.reject(new Error(reason));
+		}
+		for (const [id, transfer] of this.inboundTransfers) {
+			this.inboundTransfers.delete(id);
+			try { await transfer.handle.close(); } catch { /* ignore */ }
+		}
 	}
 }
 

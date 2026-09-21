@@ -1,0 +1,37 @@
+{
+  "name": "ppexchanger",
+  "version": "1.0.0",
+  "description": "Private, encrypted LAN messenger for your terminal",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "ppx": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.tsx",
+    "dev:alice": "tsx src/cli.tsx --name Alice --config .local/ppx-alice --port 47392",
+    "dev:bob": "tsx src/cli.tsx --name Bob --config .local/ppx-bob --port 47393",
+    "start": "node dist/cli.js",
+    "test": "tsx --test test/**/*.test.ts",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@inkjs/ui": "^2.0.0",
+    "ink": "^7.1.1",
+    "react": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

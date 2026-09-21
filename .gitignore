@@ -2,9 +2,17 @@
 **/*.rs.bk
 .DS_Store
 .bizar/
+.agents/
+.omx/
+.omx-state-locks/
+.omx-state-locks.identity.json
+.claude/
 
 # Local release staging (created when building tarballs by hand for
 # upload — the GH Actions workflow writes its own to GHA's workspace).
 staging/
 SHA256SUMS
 lanchat-*.tar.gz
+node_modules/
+dist/
+.local/
